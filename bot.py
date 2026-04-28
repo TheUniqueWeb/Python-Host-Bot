@@ -1,6 +1,9 @@
 import asyncio
 import logging
 import os
+import subprocess
+import sys
+import shutil
 from flask import Flask
 from threading import Thread
 from telegram import (
@@ -9,188 +12,158 @@ from telegram import (
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, 
-    filters, ContextTypes, ConversationHandler, CallbackQueryHandler
+    filters, ContextTypes, ConversationHandler
 )
 from telegram.constants import ParseMode
 
-# --- [ KEEP ALIVE SYSTEM FOR RENDER ] ---
+# --- [ KEEP ALIVE SYSTEM ] ---
 app = Flask('')
-
 @app.route('/')
-def home():
-    return "<b>Bot is Running 24/7!</b>"
+def home(): return "Hosting Server is Active!"
 
-def run():
-    # Render সাধারণত 8080 বা 10000 পোর্ট ব্যবহার করে
-    app.run(host='0.0.0.0', port=8080)
-
-def keep_alive():
-    t = Thread(target=run)
-    t.daemon = True
-    t.start()
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
 
 # --- [ CONFIGURATION ] ---
-# আপনার বট টোকেনটি এখানে বসান অথবা Render-এর Env Variable-এ BOT_TOKEN নাম দিন
 TOKEN = "8650245274:AAHWHzDY4LcJzSs1P6yztQLnxFUcfOXOiSY" 
 ADMIN_ID = 7136887795
-users_database = set()
+USER_BOTS = {} # সচল বটগুলো ট্র্যাক করার জন্য {user_id: subprocess_object}
 
-# Conversation States
+# States
 AUTH, DASHBOARD, UPLOAD_BOT, UPLOAD_REQ = range(4)
 
-# Logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# --- [ UI COMPONENTS ] ---
-def get_main_buttons(user_id, context):
-    bot_status = "✅" if context.user_data.get('bot_file') else "❌"
-    req_status = "✅" if context.user_data.get('req_file') else "❌"
+# --- [ HELPER FUNCTIONS ] ---
+
+async def save_file(update, context, file_type):
+    user_id = update.effective_user.id
+    user_dir = f"users/{user_id}"
+    os.makedirs(user_dir, exist_ok=True)
     
-    buttons = [
-        [KeyboardButton(f"📤 Bot.py {bot_status}"), KeyboardButton(f"📜 Req.txt {req_status}")],
-        [KeyboardButton("🚀 Connect to Server (High Speed)")],
-        [KeyboardButton("📊 My Status"), KeyboardButton("🛠️ Support")]
+    file = await context.bot.get_file(update.message.document.file_id)
+    file_path = os.path.join(user_dir, "bot.py" if file_type == "bot" else "requirements.txt")
+    await file.download_to_drive(file_path)
+    
+    context.user_data[f'{file_type}_ready'] = True
+    return file_path
+
+def get_keyboard(user_id, context):
+    b_ok = "✅" if context.user_data.get('bot_ready') else "❌"
+    r_ok = "✅" if context.user_data.get('req_ready') else "❌"
+    btns = [
+        [KeyboardButton(f"📤 Bot.py {b_ok}"), KeyboardButton(f"📜 Req.txt {r_ok}")],
+        [KeyboardButton("🚀 Connect & Run Bot")],
+        [KeyboardButton("🛑 Stop My Bot"), KeyboardButton("📊 Status")]
     ]
-    if user_id == ADMIN_ID:
-        buttons.append([KeyboardButton("👑 Admin Control Panel")])
-    return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
+    if user_id == ADMIN_ID: btns.append([KeyboardButton("👑 Admin Panel")])
+    return ReplyKeyboardMarkup(btns, resize_keyboard=True)
 
 # --- [ HANDLERS ] ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    users_database.add(user.id)
-    
-    welcome_text = (
-        f"<b>💠 ━━━━━━━━━━━━━━━━━━ 💠</b>\n"
-        f"👋 <b>স্বাগতম {user.first_name}!</b>\n"
-        f"এটি একটি <b>Advanced Python Bot Hosting</b> প্ল্যাটফর্ম।\n\n"
-        f"🛡️ <i>নিরাপত্তার স্বার্থে প্রথমে আপনার অ্যাকাউন্ট ভেরিফাই করুন।</i>\n"
-        f"<b>💠 ━━━━━━━━━━━━━━━━━━ 💠</b>"
-    )
-    
-    btn = [[KeyboardButton("🔐 Verify via Contact", request_contact=True)]]
-    await update.message.reply_text(
-        welcome_text, 
-        reply_markup=ReplyKeyboardMarkup(btn, resize_keyboard=True), 
-        parse_mode=ParseMode.HTML
-    )
+    text = f"<b>💠 ━━━━━ [ HOSTING PRO ] ━━━━━ 💠</b>\n👋 স্বাগতম <b>{user.first_name}</b>\nআপনার বট হোস্ট করতে ভেরিফাই করুন।"
+    btn = [[KeyboardButton("🔐 Verify Account", request_contact=True)]]
+    await update.message.reply_text(text, reply_markup=ReplyKeyboardMarkup(btn, resize_keyboard=True), parse_mode=ParseMode.HTML)
     return AUTH
 
 async def verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    contact = update.message.contact
-    if contact.user_id != update.message.from_user.id:
-        await update.message.reply_text("🚫 <b>Error:</b> দয়া করে আপনার নিজের কন্টাক্ট শেয়ার করুন।", parse_mode=ParseMode.HTML)
+    if update.message.contact.user_id != update.message.from_user.id:
         return AUTH
-    
-    await update.message.reply_text("✅ <b>Verification Success!</b>\nড্যাশবোর্ড লোড হচ্ছে...", parse_mode=ParseMode.HTML, reply_markup=ReplyKeyboardRemove())
-    await asyncio.sleep(1)
-    return await show_dashboard(update, context)
+    await update.message.reply_text("✅ ভেরিফিকেশন সফল!", reply_markup=ReplyKeyboardRemove())
+    return await show_dash(update, context)
 
-async def show_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_dash(update, context):
     user = update.effective_user
-    text = (
-        f"<b>💎 ━━━ [ USER DASHBOARD ] ━━━ 💎</b>\n\n"
-        f"👤 <b>User:</b> <code>{user.first_name}</code>\n"
-        f"🆔 <b>ID:</b> <code>{user.id}</code>\n"
-        f"📡 <b>Server:</b> <code>Premium-Node-01 (Active)</code>\n"
-        f"⚡ <b>Speed:</b> <code>1.0 Gbps</code>\n\n"
-        f"📢 <i>নিচের বাটনগুলো ব্যবহার করে ফাইল আপলোড করুন।</i>\n"
-        f"<b>━━━━━━━━━━━━━━━━━━━</b>"
-    )
-    await update.message.reply_text(text, reply_markup=get_main_buttons(user.id, context), parse_mode=ParseMode.HTML)
+    text = f"<b>💎 USER DASHBOARD</b>\n👤 User: <code>{user.first_name}</code>\n📂 ফাইল আপলোড করে কানেক্ট করুন।"
+    await update.message.reply_text(text, reply_markup=get_keyboard(user.id, context), parse_mode=ParseMode.HTML)
     return DASHBOARD
 
-async def handle_uploads(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if "Bot.py" in text:
-        await update.message.reply_text("📂 <b>বট ফাইল পাঠান:</b>\nদয়া করে আপনার <code>bot.py</code> ফাইলটি ডকুমেন্ট হিসেবে দিন।", parse_mode=ParseMode.HTML)
+async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message.text
+    if "Bot.py" in msg:
+        await update.message.reply_text("📤 আপনার <code>bot.py</code> ফাইলটি পাঠান।", parse_mode=ParseMode.HTML)
         return UPLOAD_BOT
-    elif "Req.txt" in text:
-        await update.message.reply_text("📜 <b>রিকোয়ারমেন্ট ফাইল পাঠান:</b>\nদয়া করে <code>requirements.txt</code> ফাইলটি দিন।", parse_mode=ParseMode.HTML)
+    elif "Req.txt" in msg:
+        await update.message.reply_text("📤 আপনার <code>requirements.txt</code> ফাইলটি পাঠান।", parse_mode=ParseMode.HTML)
         return UPLOAD_REQ
-    elif "Connect" in text:
-        return await start_hosting(update, context)
-    elif "Admin" in text and update.effective_user.id == ADMIN_ID:
-        return await admin_menu(update, context)
-    elif "Status" in text:
-        await update.message.reply_text(f"📊 <b>আপনার স্ট্যাটাস:</b> <code>Active</code>\n🚀 <b>সার্ভার টাইম:</b> <code>Unlimited</code>", parse_mode=ParseMode.HTML)
+    elif "Connect" in msg:
+        return await deploy_bot(update, context)
+    elif "Stop" in msg:
+        return await stop_bot(update, context)
     return DASHBOARD
 
-async def save_bot_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.document:
-        context.user_data['bot_file'] = update.message.document.file_id
-        await update.message.reply_text("🔵 <b>bot.py</b> সফলভাবে মেমরিতে সেভ হয়েছে!", parse_mode=ParseMode.HTML)
-    return await show_dashboard(update, context)
-
-async def save_req_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.document:
-        context.user_data['req_file'] = update.message.document.file_id
-        await update.message.reply_text("🟡 <b>requirements.txt</b> সফলভাবে সেভ হয়েছে!", parse_mode=ParseMode.HTML)
-    return await show_dashboard(update, context)
-
-async def start_hosting(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('bot_file') or not context.user_data.get('req_file'):
-        await update.message.reply_text("❌ <b>ফাইল পাওয়া যায়নি!</b>\nআগে <code>bot.py</code> এবং <code>requirements.txt</code> আপলোড করুন।", parse_mode=ParseMode.HTML)
+async def deploy_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not context.user_data.get('bot_ready') or not context.user_data.get('req_ready'):
+        await update.message.reply_text("⚠️ আগে দুটি ফাইলই আপলোড করুন!")
         return DASHBOARD
 
-    msg = await update.message.reply_text("⏳ <b>Initializing Virtual Machine...</b>", parse_mode=ParseMode.HTML)
-    
-    stages = [
-        "📡 <b>Connecting to Node-01...</b> [10%]",
-        "📂 <b>Extracting Files...</b> [30%]",
-        "🔨 <b>Installing Dependencies...</b> [55%]",
-        "⚙️ <b>Compiling Python Bytecode...</b> [80%]",
-        "🚀 <b>Starting Webhook...</b> [95%]",
-        "🟢 <b>BOT IS LIVE!</b>\n\n🎯 <b>Status:</b> <code>Online 🟢</code>\n🔋 <b>RAM Usage:</b> <code>42MB</code>\n⚡ <b>Latency:</b> <code>12ms</code>"
-    ]
+    # যদি আগে থেকে কোনো বট চলে তবে সেটি বন্ধ করা
+    if user_id in USER_BOTS:
+        USER_BOTS[user_id].terminate()
 
-    for stage in stages:
-        await asyncio.sleep(0.7)
-        await msg.edit_text(stage, parse_mode=ParseMode.HTML)
-    
+    status_msg = await update.message.reply_text("🚀 <b>Deployment Started...</b>", parse_mode=ParseMode.HTML)
+    user_dir = f"users/{user_id}"
+
+    try:
+        # ১. লাইব্রেরি ইন্সটল করা
+        await status_msg.edit_text("📦 <b>Installing Requirements...</b>", parse_mode=ParseMode.HTML)
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", f"{user_dir}/requirements.txt"])
+
+        # ২. বট রান করা (Subprocess হিসেবে)
+        await status_msg.edit_text("⚙️ <b>Starting Bot Process...</b>", parse_mode=ParseMode.HTML)
+        process = subprocess.Popen([sys.executable, f"{user_dir}/bot.py"])
+        USER_BOTS[user_id] = process
+
+        await asyncio.sleep(2)
+        await status_msg.edit_text("✅ <b>Your Bot is now Online!</b>\nএটি এখন ব্যাকগ্রাউন্ডে চলছে।", parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await status_msg.edit_text(f"❌ <b>Error:</b> <code>{str(e)}</code>", parse_mode=ParseMode.HTML)
+
     return DASHBOARD
 
-# --- [ ADMIN FUNCTIONS ] ---
-
-async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    total_users = len(users_database)
-    text = (
-        f"<b>👑 ━━━ [ ADMIN PANEL ] ━━━ 👑</b>\n\n"
-        f"👥 <b>Total Users:</b> <code>{total_users}</code>\n"
-        f"📉 <b>Server CPU:</b> <code>0.05%</code>\n"
-        f"🔋 <b>Total Hosting:</b> <code>{total_users * 2} Files</code>\n\n"
-        f"<i>এডমিন হিসেবে আপনি সব কন্ট্রোল করতে পারবেন।</i>"
-    )
-    btns = [[InlineKeyboardButton("📢 Broadcast Message", callback_query_data="bc")]]
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(btns), parse_mode=ParseMode.HTML)
+async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id in USER_BOTS:
+        USER_BOTS[user_id].terminate()
+        del USER_BOTS[user_id]
+        await update.message.reply_text("🛑 আপনার বটটি বন্ধ করা হয়েছে।")
+    else:
+        await update.message.reply_text("ℹ️ আপনার কোনো বট বর্তমানে চলছে না।")
     return DASHBOARD
 
-# --- [ MAIN RUNNER ] ---
+# --- [ FILE SAVERS ] ---
+async def bot_uploader(update, context):
+    await save_file(update, context, "bot")
+    await update.message.reply_text("✅ bot.py সফলভাবে সেভ হয়েছে।")
+    return await show_dash(update, context)
 
+async def req_uploader(update, context):
+    await save_file(update, context, "req")
+    await update.message.reply_text("✅ requirements.txt সফলভাবে সেভ হয়েছে।")
+    return await show_dash(update, context)
+
+# --- [ MAIN ] ---
 def main():
-    # Keep Alive চালু করা (Render হোস্টিং এর জন্য)
-    keep_alive()
-
-    # বট অ্যাপ্লিকেশন তৈরি
+    Thread(target=run_web, daemon=True).start()
     app = Application.builder().token(TOKEN).build()
-
-    conv_handler = ConversationHandler(
+    
+    conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
             AUTH: [MessageHandler(filters.CONTACT, verify)],
-            DASHBOARD: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_uploads),
-            ],
-            UPLOAD_BOT: [MessageHandler(filters.Document.ALL, save_bot_file)],
-            UPLOAD_REQ: [MessageHandler(filters.Document.ALL, save_req_file)],
+            DASHBOARD: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu)],
+            UPLOAD_BOT: [MessageHandler(filters.Document.ALL, bot_uploader)],
+            UPLOAD_REQ: [MessageHandler(filters.Document.ALL, req_uploader)],
         },
         fallbacks=[CommandHandler("start", start)],
     )
-
-    app.add_handler(conv_handler)
     
-    print("🚀 Advanced Bot is Running with Keep-Alive...")
+    app.add_handler(conv)
+    print("Master Bot Running...")
     app.run_polling()
 
 if __name__ == "__main__":
