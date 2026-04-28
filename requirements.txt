@@ -1,8 +1,4 @@
-python-telegram-bot
+python-telegram-bot==21.1.1
 flask
 pyTelegramBotAPI
-telethon
 requests
-aiohttp
-pymongo
-python-dotenv
