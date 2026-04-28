@@ -1,2 +1,8 @@
 python-telegram-bot
 flask
+pyTelegramBotAPI
+telethon
+requests
+aiohttp
+pymongo
+python-dotenv
