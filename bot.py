@@ -6,12 +6,19 @@ import subprocess
 import threading
 from flask import Flask
 from telegram import (
-    Update, ReplyKeyboardMarkup, KeyboardButton, 
-    ParseMode
+    Update, 
+    ReplyKeyboardMarkup, 
+    KeyboardButton, 
+    ReplyKeyboardRemove
 )
+from telegram.constants import ParseMode # সঠিক ইম্পোর্ট
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, 
-    filters, ContextTypes, ConversationHandler
+    Application, 
+    CommandHandler, 
+    MessageHandler, 
+    filters, 
+    ContextTypes, 
+    ConversationHandler
 )
 
 # --- [ কনফিগারেশন ] ---
@@ -60,11 +67,13 @@ async def auth_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    if not text: return MENU
+    
     if "Bot.py" in text:
-        await update.message.reply_text("📥 <b>bot.py</b> ফাইলটি পাঠান।")
+        await update.message.reply_text("📥 <b>bot.py</b> ফাইলটি পাঠান।", parse_mode=ParseMode.HTML)
         return UPLOADING_BOT
     elif "Req.txt" in text:
-        await update.message.reply_text("📥 <b>requirements.txt</b> ফাইলটি পাঠান।")
+        await update.message.reply_text("📥 <b>requirements.txt</b> ফাইলটি পাঠান।", parse_mode=ParseMode.HTML)
         return UPLOADING_REQ
     elif "Connect" in text:
         return await start_terminal(update, context)
@@ -72,19 +81,23 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await stop_bot(update, context)
     return MENU
 
-async def save_file(update, context, f_type):
+async def save_file(update: Update, context: ContextTypes.DEFAULT_TYPE, f_type: str):
     user_id = update.effective_user.id
     path = f"users/{user_id}"
     os.makedirs(path, exist_ok=True)
     
     doc = update.message.document
+    if not doc:
+        await update.message.reply_text("❌ দয়া করে ফাইল হিসেবে পাঠান।")
+        return MENU
+
     file = await context.bot.get_file(doc.file_id)
     f_name = "bot.py" if f_type == "bot" else "requirements.txt"
     dest = f"{path}/{f_name}"
     
     await file.download_to_drive(dest)
     context.user_data[f'{f_type}_path'] = dest
-    await update.message.reply_text(f"✅ {f_name} সেভ হয়েছে।")
+    await update.message.reply_text(f"✅ {f_name} সেভ হয়েছে।", reply_markup=main_menu(user_id, context))
     return MENU
 
 # --- [ REAL TERMINAL ENGINE ] ---
@@ -105,25 +118,22 @@ async def start_terminal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = await update.message.reply_text("🛰️ <b>টার্মিনাল বুট হচ্ছে...</b>", parse_mode=ParseMode.HTML)
     
     try:
-        # ১. লাইব্রেরি ইন্সটলেশন (যদি requirements.txt থাকে)
+        # ১. লাইব্রেরি ইন্সটলেশন
         if req_path:
-            await status.edit_text("📦 <b>Pip Installing...</b> (টার্মিনাল আউটপুট চেক হচ্ছে)")
-            # Render-এর সীমাবদ্ধতা কাটাতে --no-cache-dir এবং --user ট্রাই করা হচ্ছে
+            await status.edit_text("📦 <b>Pip Installing...</b>")
             proc = subprocess.run(
                 [sys.executable, "-m", "pip", "install", "-r", req_path, "--no-cache-dir"],
                 capture_output=True, text=True
             )
             if proc.returncode != 0:
-                # এরর মেসেজ বড় করে দেখানো হচ্ছে
-                await status.edit_text(f"❌ <b>Pip Error:</b>\n<code>{proc.stderr[:300]}</code>", parse_mode=ParseMode.HTML)
-                # এখানে আমরা পুরোপুরি স্টপ করব না, কারণ কিছু লাইব্রেরি হয়তো আগে থেকেই ইন্সটল আছে
-                await update.message.reply_text("⚠️ কিছু লাইব্রেরি ইন্সটল হয়নি, তবে বট রান করার চেষ্টা করছি...")
+                await update.message.reply_text(f"⚠️ Pip Warning:\n<code>{proc.stderr[:200]}</code>", parse_mode=ParseMode.HTML)
 
         # ২. বট রান করা
-        await status.edit_text("🚀 <b>বট স্ক্রিপ্ট এক্সিকিউট হচ্ছে...</b>")
+        await status.edit_text("🚀 <b>বট স্ক্রিপ্ট এক্সিকিউট হচ্ছে...</b>", parse_mode=ParseMode.HTML)
         
-        # আউটপুট এবং এরর ধরার জন্য লগ ফাইল তৈরি
         log_file = f"users/{user_id}/logs.txt"
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        
         with open(log_file, "w") as f:
             p = subprocess.Popen(
                 [sys.executable, bot_path],
@@ -133,7 +143,6 @@ async def start_terminal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         USER_PROCESSES[user_id] = p
         await asyncio.sleep(3)
         
-        # লগের প্রথম কয়েক লাইন ইউজারকে দেখানো
         with open(log_file, "r") as f: logs = f.read()
         
         await status.edit_text(
@@ -161,6 +170,7 @@ async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     threading.Thread(target=run_web, daemon=True).start()
     app = Application.builder().token(TOKEN).build()
+    
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
@@ -171,6 +181,7 @@ def main():
         },
         fallbacks=[CommandHandler("start", start)],
     )
+    
     app.add_handler(conv)
     print("Master Bot Running...")
     app.run_polling()
