@@ -1,11 +1,10 @@
+import os
+import sys
 import asyncio
 import logging
-import os
 import subprocess
-import sys
-import shutil
+import threading
 from flask import Flask
-from threading import Thread
 from telegram import (
     Update, ReplyKeyboardMarkup, KeyboardButton, 
     InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
@@ -16,154 +15,184 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-# --- [ KEEP ALIVE SYSTEM ] ---
+# --- [ CONFIGURATION ] ---
+TOKEN = "8650245274:AAHWHzDY4LcJzSs1P6yztQLnxFUcfOXOiSY"
+ADMIN_ID = 7136887795
+USER_PROCESSES = {} # ডাইনামিক প্রসেস ট্র্যাকিং
+
+# Flask Server for Render (Keep Alive)
 app = Flask('')
 @app.route('/')
-def home(): return "Hosting Server is Active!"
+def home(): return "<b>System Status: Online 🟢</b>"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# --- [ CONFIGURATION ] ---
-TOKEN = "8650245274:AAHWHzDY4LcJzSs1P6yztQLnxFUcfOXOiSY" 
-ADMIN_ID = 7136887795
-USER_BOTS = {} # সচল বটগুলো ট্র্যাক করার জন্য {user_id: subprocess_object}
-
-# States
-AUTH, DASHBOARD, UPLOAD_BOT, UPLOAD_REQ = range(4)
-
+# Logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# --- [ HELPER FUNCTIONS ] ---
+# States
+AUTH, MENU, UPLOADING_BOT, UPLOADING_REQ = range(4)
 
-async def save_file(update, context, file_type):
-    user_id = update.effective_user.id
-    user_dir = f"users/{user_id}"
-    os.makedirs(user_dir, exist_ok=True)
+# --- [ UI KEYBOARDS ] ---
+def main_menu(user_id, context):
+    b_stat = "✅" if context.user_data.get('bot_path') else "❌"
+    r_stat = "✅" if context.user_data.get('req_path') else "❌"
     
-    file = await context.bot.get_file(update.message.document.file_id)
-    file_path = os.path.join(user_dir, "bot.py" if file_type == "bot" else "requirements.txt")
-    await file.download_to_drive(file_path)
-    
-    context.user_data[f'{file_type}_ready'] = True
-    return file_path
-
-def get_keyboard(user_id, context):
-    b_ok = "✅" if context.user_data.get('bot_ready') else "❌"
-    r_ok = "✅" if context.user_data.get('req_ready') else "❌"
-    btns = [
-        [KeyboardButton(f"📤 Bot.py {b_ok}"), KeyboardButton(f"📜 Req.txt {r_ok}")],
-        [KeyboardButton("🚀 Connect & Run Bot")],
-        [KeyboardButton("🛑 Stop My Bot"), KeyboardButton("📊 Status")]
+    buttons = [
+        [KeyboardButton(f"📂 Bot.py {b_stat}"), KeyboardButton(f"📜 Req.txt {r_stat}")],
+        [KeyboardButton("🚀 Connect & Host Bot")],
+        [KeyboardButton("🛑 Stop My Bot"), KeyboardButton("📊 Server Status")]
     ]
-    if user_id == ADMIN_ID: btns.append([KeyboardButton("👑 Admin Panel")])
-    return ReplyKeyboardMarkup(btns, resize_keyboard=True)
+    if user_id == ADMIN_ID:
+        buttons.append([KeyboardButton("👑 Admin Panel")])
+    return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
 # --- [ HANDLERS ] ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    text = f"<b>💠 ━━━━━ [ HOSTING PRO ] ━━━━━ 💠</b>\n👋 স্বাগতম <b>{user.first_name}</b>\nআপনার বট হোস্ট করতে ভেরিফাই করুন।"
-    btn = [[KeyboardButton("🔐 Verify Account", request_contact=True)]]
+    text = (
+        f"<b>💎 ━━━ [ REAL VPS HOSTING ] ━━━ 💎</b>\n\n"
+        f"👋 স্বাগতম <b>{user.first_name}</b>!\n"
+        f"এটি একটি রিয়েল-টাইম পাইথন হোস্টিং টার্মিনাল।\n\n"
+        f"🛡️ <i>নিরাপত্তার জন্য আপনার কন্টাক্ট শেয়ার করে ভেরিফাই করুন।</i>"
+    )
+    btn = [[KeyboardButton("🔐 Verify via Contact", request_contact=True)]]
     await update.message.reply_text(text, reply_markup=ReplyKeyboardMarkup(btn, resize_keyboard=True), parse_mode=ParseMode.HTML)
     return AUTH
 
-async def verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.contact.user_id != update.message.from_user.id:
+async def auth_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    contact = update.message.contact
+    if contact.user_id != update.message.from_user.id:
+        await update.message.reply_text("❌ <b>প্রতারণা শনাক্ত!</b> নিজের কন্টাক্ট দিন।", parse_mode=ParseMode.HTML)
         return AUTH
-    await update.message.reply_text("✅ ভেরিফিকেশন সফল!", reply_markup=ReplyKeyboardRemove())
-    return await show_dash(update, context)
+    
+    await update.message.reply_text("✅ ভেরিফিকেশন সফল! ড্যাশবোর্ড লোড হচ্ছে...", reply_markup=ReplyKeyboardRemove())
+    return await show_dashboard(update, context)
 
-async def show_dash(update, context):
+async def show_dashboard(update, context):
     user = update.effective_user
-    text = f"<b>💎 USER DASHBOARD</b>\n👤 User: <code>{user.first_name}</code>\n📂 ফাইল আপলোড করে কানেক্ট করুন।"
-    await update.message.reply_text(text, reply_markup=get_keyboard(user.id, context), parse_mode=ParseMode.HTML)
-    return DASHBOARD
+    text = (
+        f"<b>🖥️ SYSTEM DASHBOARD</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 User: <code>{user.first_name}</code>\n"
+        f"🆔 ID: <code>{user.id}</code>\n"
+        f"📡 Node: <code>Render-Premium-01</code>\n\n"
+        f"📢 <i>নিচের বাটন থেকে ফাইল আপলোড করুন।</i>"
+    )
+    await update.message.reply_text(text, reply_markup=main_menu(user.id, context), parse_mode=ParseMode.HTML)
+    return MENU
 
 async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message.text
-    if "Bot.py" in msg:
-        await update.message.reply_text("📤 আপনার <code>bot.py</code> ফাইলটি পাঠান।", parse_mode=ParseMode.HTML)
-        return UPLOAD_BOT
-    elif "Req.txt" in msg:
-        await update.message.reply_text("📤 আপনার <code>requirements.txt</code> ফাইলটি পাঠান।", parse_mode=ParseMode.HTML)
-        return UPLOAD_REQ
-    elif "Connect" in msg:
-        return await deploy_bot(update, context)
-    elif "Stop" in msg:
+    text = update.message.text
+    if "Bot.py" in text:
+        await update.message.reply_text("📥 আপনার <code>bot.py</code> ফাইলটি ডকুমেন্ট হিসেবে পাঠান।", parse_mode=ParseMode.HTML)
+        return UPLOADING_BOT
+    elif "Req.txt" in text:
+        await update.message.reply_text("📥 আপনার <code>requirements.txt</code> ফাইলটি পাঠান।", parse_mode=ParseMode.HTML)
+        return UPLOADING_REQ
+    elif "Connect" in text:
+        return await start_real_hosting(update, context)
+    elif "Stop" in text:
         return await stop_bot(update, context)
-    return DASHBOARD
+    elif "Admin Panel" in text and update.effective_user.id == ADMIN_ID:
+        active = len(USER_PROCESSES)
+        await update.message.reply_text(f"👑 <b>Admin Stats:</b>\n\n🚀 Active Bots: <code>{active}</code>\n🔋 Server: <code>Online</code>", parse_mode=ParseMode.HTML)
+    return MENU
 
-async def deploy_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- [ FILE HANDLERS ] ---
+
+async def save_file(update, context, type):
     user_id = update.effective_user.id
-    if not context.user_data.get('bot_ready') or not context.user_data.get('req_ready'):
-        await update.message.reply_text("⚠️ আগে দুটি ফাইলই আপলোড করুন!")
-        return DASHBOARD
+    user_dir = f"vps/{user_id}"
+    os.makedirs(user_dir, exist_ok=True)
+    
+    doc = update.message.document
+    file = await context.bot.get_file(doc.file_id)
+    
+    if type == "bot":
+        path = f"{user_dir}/bot.py"
+        context.user_data['bot_path'] = path
+    else:
+        path = f"{user_dir}/requirements.txt"
+        context.user_data['req_path'] = path
+        
+    await file.download_to_drive(path)
+    await update.message.reply_text(f"✅ <b>{doc.file_name}</b> সেভ হয়েছে।", parse_mode=ParseMode.HTML)
+    return await show_dashboard(update, context)
 
-    # যদি আগে থেকে কোনো বট চলে তবে সেটি বন্ধ করা
-    if user_id in USER_BOTS:
-        USER_BOTS[user_id].terminate()
+# --- [ REAL TERMINAL ENGINE ] ---
 
-    status_msg = await update.message.reply_text("🚀 <b>Deployment Started...</b>", parse_mode=ParseMode.HTML)
-    user_dir = f"users/{user_id}"
+async def start_real_hosting(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    bot_file = context.user_data.get('bot_path')
+    req_file = context.user_data.get('req_path')
 
+    if not bot_file or not req_file:
+        await update.message.reply_text("❌ ফাইল পাওয়া যায়নি! আগে Bot.py এবং Req.txt আপলোড করুন।")
+        return MENU
+
+    if user_id in USER_PROCESSES:
+        await update.message.reply_text("⚠️ একটি বট অলরেডি চলছে। সেটি আগে Stop করুন।")
+        return MENU
+
+    log = await update.message.reply_text("⚙️ <b>টার্মিনাল বুট হচ্ছে...</b>", parse_mode=ParseMode.HTML)
+    
     try:
-        # ১. লাইব্রেরি ইন্সটল করা
-        await status_msg.edit_text("📦 <b>Installing Requirements...</b>", parse_mode=ParseMode.HTML)
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", f"{user_dir}/requirements.txt"])
+        # ১. রিয়েল ডিপেন্ডেন্সি ইন্সটল
+        await log.edit_text("📦 <b>Installing Dependencies...</b>", parse_mode=ParseMode.HTML)
+        subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_file])
 
-        # ২. বট রান করা (Subprocess হিসেবে)
-        await status_msg.edit_text("⚙️ <b>Starting Bot Process...</b>", parse_mode=ParseMode.HTML)
-        process = subprocess.Popen([sys.executable, f"{user_dir}/bot.py"])
-        USER_BOTS[user_id] = process
-
+        # ২. ব্যাকগ্রাউন্ড প্রসেস লঞ্চ
+        await log.edit_text("🚀 <b>Executing Script...</b>", parse_mode=ParseMode.HTML)
+        p = subprocess.Popen([sys.executable, bot_file])
+        USER_PROCESSES[user_id] = p
+        
         await asyncio.sleep(2)
-        await status_msg.edit_text("✅ <b>Your Bot is now Online!</b>\nএটি এখন ব্যাকগ্রাউন্ডে চলছে।", parse_mode=ParseMode.HTML)
+        await log.edit_text(
+            f"✅ <b>বট এখন আপনার সার্ভারে লাইভ!</b>\n\n"
+            f"📊 PID: <code>{p.pid}</code>\n"
+            f"🟢 Status: <code>Running</code>",
+            parse_mode=ParseMode.HTML
+        )
     except Exception as e:
-        await status_msg.edit_text(f"❌ <b>Error:</b> <code>{str(e)}</code>", parse_mode=ParseMode.HTML)
-
-    return DASHBOARD
+        await log.edit_text(f"💥 <b>Terminal Error:</b> <code>{str(e)}</code>", parse_mode=ParseMode.HTML)
+    
+    return MENU
 
 async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id in USER_BOTS:
-        USER_BOTS[user_id].terminate()
-        del USER_BOTS[user_id]
-        await update.message.reply_text("🛑 আপনার বটটি বন্ধ করা হয়েছে।")
+    if user_id in USER_PROCESSES:
+        USER_PROCESSES[user_id].terminate()
+        del USER_PROCESSES[user_id]
+        await update.message.reply_text("🛑 <b>বট সফলভাবে বন্ধ করা হয়েছে।</b>", parse_mode=ParseMode.HTML)
     else:
-        await update.message.reply_text("ℹ️ আপনার কোনো বট বর্তমানে চলছে না।")
-    return DASHBOARD
+        await update.message.reply_text("ℹ️ কোনো সচল বট পাওয়া যায়নি।")
+    return MENU
 
-# --- [ FILE SAVERS ] ---
-async def bot_uploader(update, context):
-    await save_file(update, context, "bot")
-    await update.message.reply_text("✅ bot.py সফলভাবে সেভ হয়েছে।")
-    return await show_dash(update, context)
+# --- [ MAIN RUNNER ] ---
 
-async def req_uploader(update, context):
-    await save_file(update, context, "req")
-    await update.message.reply_text("✅ requirements.txt সফলভাবে সেভ হয়েছে।")
-    return await show_dash(update, context)
-
-# --- [ MAIN ] ---
 def main():
-    Thread(target=run_web, daemon=True).start()
-    app = Application.builder().token(TOKEN).build()
+    # Flask Start
+    threading.Thread(target=run_web, daemon=True).start()
     
+    app = Application.builder().token(TOKEN).build()
+
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            AUTH: [MessageHandler(filters.CONTACT, verify)],
-            DASHBOARD: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu)],
-            UPLOAD_BOT: [MessageHandler(filters.Document.ALL, bot_uploader)],
-            UPLOAD_REQ: [MessageHandler(filters.Document.ALL, req_uploader)],
+            AUTH: [MessageHandler(filters.CONTACT, auth_handler)],
+            MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu)],
+            UPLOADING_BOT: [MessageHandler(filters.Document.ALL, lambda u, c: save_file(u, c, "bot"))],
+            UPLOADING_REQ: [MessageHandler(filters.Document.ALL, lambda u, c: save_file(u, c, "req"))],
         },
         fallbacks=[CommandHandler("start", start)],
     )
-    
+
     app.add_handler(conv)
-    print("Master Bot Running...")
+    print("💎 Master Hosting Bot is Live!")
     app.run_polling()
 
 if __name__ == "__main__":
