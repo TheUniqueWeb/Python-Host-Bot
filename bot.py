@@ -18,22 +18,20 @@ from telegram.ext import (
 # --- [ CONFIGURATION ] ---
 TOKEN = "8650245274:AAHWHzDY4LcJzSs1P6yztQLnxFUcfOXOiSY"
 ADMIN_ID = 7136887795
-ACTIVE_FLEET = {}  # {user_id: process_object}
+ACTIVE_FLEET = {}
+USER_LIST = set() # ইউজারের ডাটা রাখার জন্য (বট রিস্টার্ট দিলে এটি খালি হয়ে যাবে, তবে কাজ করবে)
 
 # Logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # States
-AUTH, DASHBOARD, UPLOAD_CODE, UPLOAD_REQ = range(4)
+AUTH, DASHBOARD, UPLOAD_CODE, UPLOAD_REQ, ADMIN_STATE = range(5)
 
 # --- [ WEB SERVER FOR RENDER ] ---
 app = Flask(__name__)
-
 @app.route('/')
-def health_check():
-    return "<b>MR BOT MANAGER IS ONLINE 🚀</b>", 200
+def health_check(): return "MR BOT MANAGER IS LIVE 🚀", 200
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -49,25 +47,34 @@ def get_main_kb(user_id):
         btns.append([KeyboardButton("👑 Admin Panel")])
     return ReplyKeyboardMarkup(btns, resize_keyboard=True)
 
-# --- [ CORE HANDLERS ] ---
+def get_admin_kb():
+    btns = [
+        [InlineKeyboardButton("📢 Broadcast", callback_query_data="admin_bc")],
+        [InlineKeyboardButton("👥 User Stats", callback_query_data="admin_users")],
+        [InlineKeyboardButton("🔙 Back to Menu", callback_query_data="back_to_dash")]
+    ]
+    return InlineKeyboardMarkup(btns)
+
+# --- [ HANDLERS ] ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    welcome_text = (
+    user_id = update.effective_user.id
+    USER_LIST.add(user_id)
+    
+    text = (
         f"<b>🤖 MR BOT MANAGER V5</b>\n\n"
-        f"স্বাগতম <b>{user.first_name}</b>!\n"
-        f"আপনার নিজস্ব বট হোস্টিং করার জন্য নিচের বাটনটি চাপুন।"
+        f"স্বাগতম <b>{update.effective_user.first_name}</b>!\n"
+        f"নিচের বাটন চেপে একাউন্ট ভেরিফাই করুন।"
     )
     btn = [[KeyboardButton("🔐 Verify Account", request_contact=True)]]
-    await update.message.reply_text(welcome_text, reply_markup=ReplyKeyboardMarkup(btn, resize_keyboard=True), parse_mode=ParseMode.HTML)
+    await update.message.reply_text(text, reply_markup=ReplyKeyboardMarkup(btn, resize_keyboard=True), parse_mode=ParseMode.HTML)
     return AUTH
 
 async def auth_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    contact = update.message.contact
-    if contact.user_id != update.message.from_user.id:
-        await update.message.reply_text("❌ জালিয়াতি ধরা পড়েছে!")
+    if update.message.contact.user_id != update.message.from_user.id:
+        await update.message.reply_text("❌ জালিয়াতি করবেন না!")
         return AUTH
     
-    await update.message.reply_text("✅ ভেরিফিকেশন সফল! আপনার ড্যাশবোর্ড ওপেন হচ্ছে...", reply_markup=get_main_kb(update.effective_user.id))
+    await update.message.reply_text("✅ ভেরিফিকেশন সফল!", reply_markup=get_main_kb(update.effective_user.id))
     return DASHBOARD
 
 async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -75,7 +82,7 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     if text == "🚀 Deploy Bot":
-        await update.message.reply_text("📂 আপনার মেইন ফাইলটি (যেমন: <code>bot.py</code>) ডকুমেন্ট হিসেবে পাঠান।", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("📂 আপনার <b>bot.py</b> ফাইলটি ডকুমেন্ট হিসেবে পাঠান।", parse_mode=ParseMode.HTML)
         return UPLOAD_CODE
     
     elif text == "🛰️ My Fleet":
@@ -84,130 +91,114 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "📊 Stats":
         cpu = psutil.cpu_percent()
         ram = psutil.virtual_memory().percent
-        active = len(ACTIVE_FLEET)
-        msg = (
-            f"<b>📊 SERVER STATUS</b>\n\n"
-            f"🖥️ CPU Usage: {cpu}%\n"
-            f"🧠 RAM Usage: {ram}%\n"
-            f"🛰️ Active Bots: {active}"
-        )
-        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+        await update.message.reply_text(f"📊 <b>SERVER STATS</b>\n\nCPU: {cpu}%\nRAM: {ram}%", parse_mode=ParseMode.HTML)
+        return DASHBOARD
+
+    elif text == "👑 Admin Panel":
+        if user_id == ADMIN_ID:
+            await update.message.reply_text("👑 <b>WELCOME ADMIN</b>\nকন্ট্রোল প্যানেল সিলেক্ট করুন:", 
+                                           reply_markup=get_admin_kb(), parse_mode=ParseMode.HTML)
+            return DASHBOARD # Keep in dashboard to handle callbacks
+        else:
+            await update.message.reply_text("🚫 আপনার এই পারমিশন নেই।")
+            return DASHBOARD
     
     return DASHBOARD
 
-# --- [ BOT MANAGEMENT SYSTEM ] ---
+# --- [ BOT MANAGEMENT LOGIC ] ---
 async def show_fleet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     path = f"fleet/{user_id}/bot.py"
     
     if not os.path.exists(path):
-        await update.message.reply_text("❌ আপনার কোনো বট আপলোড করা নেই।")
+        await update.message.reply_text("❌ আপনার কোনো বট নেই। আগে Deploy করুন।")
         return DASHBOARD
     
     status = "🟢 Online" if user_id in ACTIVE_FLEET else "🔴 Offline"
     btns = [
         [InlineKeyboardButton("⚡ Start", callback_query_data="run"),
          InlineKeyboardButton("🛑 Stop", callback_query_data="stop")],
-        [InlineKeyboardButton("📜 View Logs", callback_query_data="logs"),
-         InlineKeyboardButton("🗑️ Wipe Bot", callback_query_data="wipe")]
+        [InlineKeyboardButton("📜 Logs", callback_query_data="logs"),
+         InlineKeyboardButton("🗑️ Wipe", callback_query_data="wipe")]
     ]
-    await update.message.reply_text(
-        f"<b>🤖 BOT MANAGER</b>\n\nStatus: <code>{status}</code>\nPath: <code>/fleet/{user_id}/</code>",
-        reply_markup=InlineKeyboardMarkup(btns), parse_mode=ParseMode.HTML
-    )
+    await update.message.reply_text(f"🤖 <b>Bot Manager</b>\nStatus: {status}", 
+                                   reply_markup=InlineKeyboardMarkup(btns), parse_mode=ParseMode.HTML)
     return DASHBOARD
 
-async def fleet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
-    path = f"fleet/{user_id}"
+    data = query.data
     await query.answer()
 
-    if query.data == "run":
+    # Admin Callbacks
+    if data == "admin_users":
+        await query.message.reply_text(f"👥 <b>Total Users:</b> {len(USER_LIST)}", parse_mode=ParseMode.HTML)
+    
+    elif data == "admin_bc":
+        await query.message.reply_text("📝 ব্রডকাস্ট মেসেজটি লিখুন:")
+        # এখানে ব্রডকাস্ট লজিক যোগ করা যায়
+
+    # Fleet Callbacks
+    path = f"fleet/{user_id}"
+    if data == "run":
         if user_id in ACTIVE_FLEET:
-            await query.edit_message_text("⚠️ বট অলরেডি রানিং আছে।")
-            return
-        
-        # Start Non-blocking Subprocess
-        log_file = open(f"{path}/terminal.log", "w")
-        try:
+            await query.edit_message_text("⚠️ অলরেডি রানিং!")
+        else:
+            log_file = open(f"{path}/terminal.log", "w")
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, f"{path}/bot.py",
-                stdout=log_file, stderr=log_file
+                sys.executable, f"{path}/bot.py", stdout=log_file, stderr=log_file
             )
             ACTIVE_FLEET[user_id] = proc
-            await query.edit_message_text("🚀 বট সফলভাবে লাইভ করা হয়েছে!")
-        except Exception as e:
-            await query.edit_message_text(f"❌ এরর: {str(e)}")
+            await query.edit_message_text("🚀 বট লাইভ হয়েছে!")
 
-    elif query.data == "stop":
+    elif data == "stop":
         if user_id in ACTIVE_FLEET:
-            proc = ACTIVE_FLEET[user_id]
-            proc.terminate()
+            ACTIVE_FLEET[user_id].terminate()
             del ACTIVE_FLEET[user_id]
             await query.edit_message_text("🛑 বট বন্ধ করা হয়েছে।")
         else:
-            await query.edit_message_text("❌ বটটি বর্তমানে চালু নেই।")
+            await query.edit_message_text("❌ কোনো বট চালু নেই।")
 
-    elif query.data == "logs":
-        log_path = f"{path}/terminal.log"
-        if os.path.exists(log_path):
-            with open(log_path, "r") as f:
-                logs = f.read()[-1000:] # শেষ ১০০০ অক্ষর
-            await query.message.reply_text(f"<b>📜 Last Logs:</b>\n<code>{logs or 'No logs yet.'}</code>", parse_mode=ParseMode.HTML)
-        else:
-            await query.answer("কোনো লগ ফাইল পাওয়া যায়নি।")
-
-    elif query.data == "wipe":
+    elif data == "logs":
+        log_p = f"{path}/terminal.log"
+        if os.path.exists(log_p):
+            with open(log_p, "r") as f: logs = f.read()[-500:]
+            await query.message.reply_text(f"📜 <b>Logs:</b>\n<code>{logs}</code>", parse_mode=ParseMode.HTML)
+    
+    elif data == "wipe":
         if user_id in ACTIVE_FLEET:
             ACTIVE_FLEET[user_id].terminate()
             del ACTIVE_FLEET[user_id]
         shutil.rmtree(path, ignore_errors=True)
-        await query.edit_message_text("🗑️ আপনার বটের সব ফাইল ডিলিট করা হয়েছে।")
+        await query.edit_message_text("🗑️ ফাইল ডিলিট করা হয়েছে।")
 
-# --- [ FILE RECEIVERS ] ---
+# --- [ FILE UPLOAD SYSTEM ] ---
 async def bot_rec(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    doc = update.message.document
+    if not update.message.document: return UPLOAD_CODE
     
-    if not doc.file_name.endswith('.py'):
-        await update.message.reply_text("❌ শুধুমাত্র .py ফাইল পাঠান।")
-        return UPLOAD_CODE
-
     os.makedirs(f"fleet/{user_id}", exist_ok=True)
-    file = await context.bot.get_file(doc.file_id)
-    await file.download_to_drive(f"fleet/{user_id}/bot.py")
-    
-    await update.message.reply_text("✅ Code Saved! এখন <code>requirements.txt</code> পাঠান অথবা <b>/skip</b> লিখুন।", parse_mode=ParseMode.HTML)
+    f = await context.bot.get_file(update.message.document.file_id)
+    await f.download_to_drive(f"fleet/{user_id}/bot.py")
+    await update.message.reply_text("✅ Code Saved! এখন <b>requirements.txt</b> দিন (অথবা /skip লিখুন)।", parse_mode=ParseMode.HTML)
     return UPLOAD_REQ
 
 async def req_rec(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if update.message.document:
-        doc = update.message.document
-        file = await context.bot.get_file(doc.file_id)
-        await file.download_to_drive(f"fleet/{user_id}/requirements.txt")
-        
-        # স্বয়ংক্রিয়ভাবে লাইব্রেরি ইন্সটল করার চেষ্টা
-        await update.message.reply_text("📦 Installing dependencies... please wait.")
+        f = await context.bot.get_file(update.message.document.file_id)
+        await f.download_to_drive(f"fleet/{user_id}/requirements.txt")
         os.system(f"pip install -r fleet/{user_id}/requirements.txt")
     
-    await update.message.reply_text("✅ সেটআপ সম্পন্ন! /start দিয়ে ড্যাশবোর্ডে যান।")
-    return await show_dash_minimal(update, context)
-
-async def show_dash_minimal(update, context):
-    await update.message.reply_text("🎮 Dashboard Ready!", reply_markup=get_main_kb(update.effective_user.id))
+    await update.message.reply_text("✅ সব সেট! ড্যাশবোর্ড থেকে স্টার্ট করুন।", reply_markup=get_main_kb(user_id))
     return DASHBOARD
 
-# --- [ MAIN EXECUTION ] ---
+# --- [ MAIN ] ---
 def main():
-    # Flask Web Server in Thread
-    web_thread = Thread(target=run_web)
-    web_thread.daemon = True
-    web_thread.start()
+    Thread(target=run_web, daemon=True).start()
 
-    # Telegram Bot
-    application = Application.builder().token(TOKEN).build()
+    app_bot = Application.builder().token(TOKEN).build()
     
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
@@ -215,7 +206,7 @@ def main():
             AUTH: [MessageHandler(filters.CONTACT, auth_handler)],
             DASHBOARD: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu),
-                CallbackQueryHandler(fleet_callback)
+                CallbackQueryHandler(callback_handler)
             ],
             UPLOAD_CODE: [MessageHandler(filters.Document.ALL, bot_rec)],
             UPLOAD_REQ: [
@@ -224,12 +215,12 @@ def main():
             ],
         },
         fallbacks=[CommandHandler("start", start)],
+        allow_reentry=True
     )
     
-    application.add_handler(conv)
-    
-    print("🚀 MR BOT MANAGER is running...")
-    application.run_polling(drop_pending_updates=True)
+    app_bot.add_handler(conv)
+    print("🚀 MR BOT MANAGER V5 STARTED")
+    app_bot.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
